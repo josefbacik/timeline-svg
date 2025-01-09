@@ -115,9 +115,9 @@ impl Timeline {
     /// something like this
     ///
     /// ```
-    /// # extern crate timeline;
+    /// # extern crate timeline_svg;
     /// # fn main() {
-    /// use timeline::Timeline;
+    /// use timeline_svg::Timeline;
     ///
     /// let mut timeline = Timeline::default();
     /// timeline.add_event("Process A".to_string(), 0, 1, "CPU 0".to_string());
