@@ -3,10 +3,11 @@ use std::fs::File;
 use std::io::{Result, Write};
 use std::time::Duration;
 
+use alphanumeric_sort::compare_str;
 use rand::prelude::*;
 use svg::node::element::path::Data;
-use svg::node::element::{Group, Line, Path, Rectangle, Text};
-use alphanumeric_sort::compare_str;
+use svg::node::element::{Group, Line, Path, Rectangle, Text, Title};
+use roundable::{Roundable, Tie, SECOND};
 
 const COLORS: &'static [&'static str] = &[
     "blue",
@@ -53,6 +54,7 @@ pub struct Timeline {
     width_per_major_unit: f64,
     min_elapsed_time: u64,
     time_scale: u64,
+    colormap: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +87,7 @@ impl Default for Timeline {
             width_per_major_unit: 1000.0,
             min_elapsed_time: u64::MAX,
             time_scale: 1,
+            colormap: HashMap::new(),
         }
     }
 }
@@ -146,6 +149,10 @@ impl Timeline {
         if elapsed < self.min_elapsed_time {
             self.min_elapsed_time = elapsed;
             //self.calculate_time_scale();
+        }
+        if !self.colormap.contains_key(&event.name) {
+            let color = COLORS[rand::thread_rng().gen_range(0..COLORS.len())];
+            self.colormap.insert(event.name.clone(), color.to_string());
         }
         match self.events.get_mut(&event.location) {
             Some(events) => events.push(event),
@@ -220,11 +227,38 @@ impl Timeline {
         }
     }
 
-    fn make_timeline_box(&self) -> Group {
+    fn make_busy_line(&self, processes: &HashMap<String, Duration>, mut y: u64, x: u64) -> Group {
+        let mut g = Group::new();
+        for (process, busy_time) in processes {
+            let duration = *busy_time * 10;
+            if duration < Duration::from_millis(1) {
+                continue;
+            }
+            let y2 = y - duration.as_millis() as u64;
+            let color = match self.colormap.get(process) {
+                Some(color) => color.clone(),
+                None => "black".to_string()
+            };
+            let mut line = Line::new()
+                .set("x1", x)
+                .set("y1", y)
+                .set("x2", x)
+                .set("y2", y2)
+                .set("stroke", color)
+                .set("stroke-width", 1);
+            line = line.add(
+                Title::new(process.clone()));
+            g = g.add(line);
+            y = y2;
+        }
+        g
+    }
+
+    fn make_timeline_box(&self, start_x: u64) -> Group {
         let row_height = 20;
-        let total_duration = Duration::from_nanos(self.end_time - self.start_time);
-        let width = total_duration.as_millis() as f64 / 100.0;
         let width_per_major = 100.0;
+        let total_duration = Duration::from_nanos(self.end_time - self.start_time);
+        let width = total_duration.round_to(SECOND, Tie::Up).as_millis() as f64 / 10.0 + start_x as f64;
         let big_tick = row_height / 2;
         let small_tick = row_height / 4;
 
@@ -235,7 +269,7 @@ impl Timeline {
         let mut g = Group::new();
         g = g.add(
             Line::new()
-                .set("x1", 0)
+                .set("x1", start_x)
                 .set("y1", row_height)
                 .set("x2", width)
                 .set("y2", row_height)
@@ -246,7 +280,7 @@ impl Timeline {
         let mut cur_time = Duration::from_nanos(0);
         while cur_time < total_duration {
             // Big tick for our start
-            let x = cur_time.as_secs() as f64 * width_per_major;
+            let x = cur_time.as_secs() as f64 * width_per_major + start_x as f64;
             g = g
                 .add(
                     Line::new()
@@ -268,7 +302,7 @@ impl Timeline {
             // Small ticks for the middle parts
             for tick in 1..10 {
                 let x = cur_time.as_secs() as f64 * width_per_major
-                    + (width_per_major / 10.0) * tick as f64;
+                    + (width_per_major / 10.0) * tick as f64 + start_x as f64;
                 let line = Line::new()
                     .set("x1", x)
                     .set("y1", row_height)
@@ -322,19 +356,18 @@ impl Timeline {
     /// events, and the colors are kept consistent with the same event.
     pub fn write(&self, writer: &mut dyn Write) -> Result<()> {
         println!("Sorting categories events {}", self.events.len());
-        let mut colormap: HashMap<String, String> = HashMap::new();
         let mut categories: Vec<String> = self.events.clone().into_keys().collect();
         categories.sort_by(|a, b| compare_str(a, b));
         println!("eh??");
-        let width = (self.end_time - self.start_time) as f64 / self.min_elapsed_time as f64
+        let total_time = Duration::from_nanos(self.end_time - self.start_time);
+
+        let width = total_time.round_to(SECOND, Tie::Up).as_nanos()  as f64 / self.min_elapsed_time as f64
             * self.width_per_unit;
         let height = (categories.len() as u64) * self.row_height + 10;
 
         let mut doc = svg::Document::new()
             .set("width", width)
-            .set("height", height)
-            .add(self.make_timeline_box());
-
+            .set("height", height);
         let mut max_len = 0;
         for category in categories.iter() {
             doc = doc.add(
@@ -349,6 +382,9 @@ impl Timeline {
             }
         }
 
+        max_len *= 10;
+        doc = doc.add(self.make_timeline_box(max_len as u64));
+
         println!("Adding events {}", self.events.len());
         let mut first = true;
         for category in &categories {
@@ -356,29 +392,24 @@ impl Timeline {
             if events.len() == 0 {
                 continue;
             }
-            println!("Events for category {} {}", category, events.len());
             let mut events = events.clone();
             events.sort_by(|a, b| a.start_time.cmp(&b.start_time));
             let mut busy_time = Duration::new(0, 0);
-            let mut cur_x = max_len * 10;
+            let mut cur_x = max_len as u64;
             let mut cutoff = Duration::from_nanos(self.start_time) + Duration::from_millis(10);
+            let mut processes: HashMap<String, Duration> = HashMap::new();
             for event in events {
                 let mut start_time = Duration::from_nanos(event.start_time);
                 let end_time = Duration::from_nanos(event.end_time);
                 while start_time >= cutoff {
                     if busy_time > Duration::from_nanos(0) {
-                        println!("Busy time is {:?}", busy_time.as_millis());
-                        let y1 = self.category_y(&category, &categories) + self.row_height;
-                        let y2 = y1 - (busy_time.as_millis() * 10) as u64;
-                        let line = Line::new()
-                            .set("x1", cur_x)
-                            .set("y1", y1)
-                            .set("x2", cur_x)
-                            .set("y2", y2)
-                            .set("stroke", "black")
-                            .set("stroke-width", 1);
-                        doc = doc.add(line);
+                        doc = doc.add(self.make_busy_line(
+                            &processes,
+                            self.category_y(&category, &categories) + self.row_height,
+                            cur_x,
+                        ));
                     }
+                    processes.clear();
                     busy_time = Duration::from_nanos(0);
                     cutoff += Duration::from_millis(10);
                     cur_x += 1;
@@ -386,36 +417,46 @@ impl Timeline {
 
                 while end_time >= cutoff {
                     if start_time < cutoff {
+                        match processes.get_mut(&event.name) {
+                            Some(time) => {
+                                *time += cutoff - start_time;
+                            }
+                            None => {
+                                processes.insert(event.name.clone(), cutoff - start_time);
+                            }
+                        };
                         busy_time += cutoff - start_time;
                     }
                     if busy_time > Duration::from_nanos(0) {
-                        println!("Busy time is {:?}", busy_time.as_millis());
-                        let y1 = self.category_y(&category, &categories) + self.row_height;
-                        let y2 = y1 - (busy_time.as_millis() * 10) as u64;
-                        let line = Line::new()
-                            .set("x1", cur_x)
-                            .set("y1", y1)
-                            .set("x2", cur_x)
-                            .set("y2", y2)
-                            .set("stroke", "black")
-                            .set("stroke-width", 1);
-                        doc = doc.add(line);
+                        doc = doc.add(self.make_busy_line(
+                            &processes,
+                            self.category_y(&category, &categories) + self.row_height,
+                            cur_x,
+                        ));
                     }
                     start_time = cutoff;
                     busy_time = Duration::from_nanos(0);
+                    processes.clear();
                     while start_time >= cutoff {
                         cutoff += Duration::from_millis(10);
                         cur_x += 1;
                     }
                 }
                 busy_time += end_time - start_time;
+                match processes.get_mut(&event.name) {
+                    Some(time) => {
+                        *time += end_time - start_time;
+                    }
+                    None => {
+                        processes.insert(event.name.clone(), end_time - start_time);
+                    }
+                }
 
                 if first {
                     println!("Event {:?}, startime {}", event, self.start_time);
                     first = false;
                 }
             }
-            println!("cur_x is {}", cur_x);
         }
         println!("Adding triggers {}", self.triggers.len());
         for trigger in &self.triggers {

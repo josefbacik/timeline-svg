@@ -7,4 +7,5 @@ license = "MIT or Apache-2.0"
 [dependencies]
 alphanumeric-sort = "1.5.3"
 rand = "0.8.5"
+roundable = "0.2.0"
 svg = "0.18.0"
